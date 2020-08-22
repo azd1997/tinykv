@@ -47,6 +47,7 @@ func (en *Engines) Close() error {
 	return nil
 }
 
+// 调用Destroy就别再调Close
 func (en *Engines) Destroy() error {
 	if err := en.Close(); err != nil {
 		return err

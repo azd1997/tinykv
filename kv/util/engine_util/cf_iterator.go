@@ -4,6 +4,7 @@ import (
 	"github.com/Connor1996/badger"
 )
 
+// CFItem 数据单位
 type CFItem struct {
 	item      *badger.Item
 	prefixLen int
@@ -54,6 +55,7 @@ func (i *CFItem) UserMeta() []byte {
 	return i.item.UserMeta()
 }
 
+// BadgerIterator 在badger原生迭代器上包装一层，加上前缀信息（也就是Cf_列族信息）
 type BadgerIterator struct {
 	iter   *badger.Iterator
 	prefix string
@@ -87,14 +89,17 @@ func (it *BadgerIterator) Next() {
 	it.iter.Next()
 }
 
+// Seek 定位到具体某一个键位置
 func (it *BadgerIterator) Seek(key []byte) {
 	it.iter.Seek(append([]byte(it.prefix), key...))
 }
 
+// Rewind 将迭代器指向初始点（也就是第0个位置（如果迭代器是向左移动的，那么指向最右位置））
 func (it *BadgerIterator) Rewind() {
 	it.iter.Rewind()
 }
 
+// DBIterator DB迭代器
 type DBIterator interface {
 	// Item returns pointer to the current key-value pair.
 	Item() DBItem
@@ -111,6 +116,7 @@ type DBIterator interface {
 	Close()
 }
 
+// DBItem DB中数据的基本单位
 type DBItem interface {
 	// Key returns the key.
 	Key() []byte

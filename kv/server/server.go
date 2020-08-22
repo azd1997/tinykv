@@ -2,7 +2,7 @@ package server
 
 import (
 	"context"
-
+	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/coprocessor"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
@@ -38,22 +38,127 @@ func NewServer(storage storage.Storage) *Server {
 // Raw API.
 func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		return nil, err
+	}
+
+	val, err := reader.GetCF(req.Cf, req.Key)
+	if err != nil {
+		return nil, err
+	}
+	if val == nil {		// key not found
+		return &kvrpcpb.RawGetResponse{
+			NotFound:             true,
+		}, nil
+	}
+
+	rsp := &kvrpcpb.RawGetResponse{
+		Value:                val,
+		NotFound:             false,
+	}
+
+	return rsp, nil
 }
 
 func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	modify := storage.Modify{Data: storage.Put{
+		Key:   req.Key,
+		Value: req.Value,
+		Cf:    req.Cf,
+	}}
+
+	err := server.storage.Write(req.Context, []storage.Modify{modify})
+	if err != nil {
+		return nil, err
+	}
+
+	return &kvrpcpb.RawPutResponse{
+		RegionError:          nil,
+		Error:                "",
+	}, nil
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	modify := storage.Modify{Data: storage.Delete{
+		Key:   req.Key,
+		Cf:    req.Cf,
+	}}
+
+	err := server.storage.Write(req.Context, []storage.Modify{modify})
+	if err != nil {
+		return nil, err
+	}
+
+	return &kvrpcpb.RawDeleteResponse{
+		RegionError:          nil,
+		Error:                "",
+	}, nil
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		return nil, err
+	}
+
+	iter := reader.IterCF(req.Cf)
+
+	kvPairs := make([]*kvrpcpb.KvPair, 0, req.Limit)
+	for iter.Seek(req.StartKey); iter.Valid() && len(kvPairs) < cap(kvPairs); iter.Next() {
+		item := iter.Item()
+		k := item.Key()
+		v, e := item.Value()
+
+		var keyError *kvrpcpb.KeyError
+		if e != nil {
+			switch e {
+			case badger.ErrConflict:
+				keyError = &kvrpcpb.KeyError{Conflict:&kvrpcpb.WriteConflict{
+					StartTs:              0,
+					ConflictTs:           0,
+					Key:                  nil,
+					Primary:              nil,
+				}}
+			case badger.ErrRetry:
+				keyError = &kvrpcpb.KeyError{Retryable:badger.ErrRetry.Error()}
+			// TODO 暂且不清楚
+
+			}
+		}
+
+		// 尽管提供了KeyError，但返回的e是badger中定义的，只能根据e是badger中何种错误来决定对应的何种KeyError
+		// 但目前不太清楚。 badger的错误码定义在badger/errors.go，但item.Value()返回的错误码却并不是那些制定好的错误
+		// 暂时统一看作
+		//keyError := &kvrpcpb.KeyError{
+		//	Locked:               nil,
+		//	Retryable:            "",
+		//	Abort:                "",
+		//	Conflict:             nil,
+		//}
+
+		pair := &kvrpcpb.KvPair{
+			Error:                keyError,
+			Key:                  k,
+			Value:                v,
+		}
+		kvPairs = append(kvPairs, pair)
+	}
+
+	rsp := &kvrpcpb.RawScanResponse{
+		RegionError:          nil,
+		Error:                "",
+		Kvs:                  kvPairs,
+	}
+
+	return rsp, nil
 }
 
 // Raft commands (tinykv <-> tinykv)
