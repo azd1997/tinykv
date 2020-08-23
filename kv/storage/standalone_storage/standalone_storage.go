@@ -1,9 +1,6 @@
 package standalone_storage
 
 import (
-	"errors"
-	"fmt"
-
 	"github.com/Connor1996/badger"
 	"github.com/pingcap-incubator/tinykv/kv/config"
 	"github.com/pingcap-incubator/tinykv/kv/storage"
@@ -46,11 +43,7 @@ func (s *StandAloneStorage) Stop() error {
 	// Your Code Here (1).
 
 	// 需要在停止时关闭底层的db
-	err := s.engine.Close()
-	if err != nil {
-		return err
-	}
-	return nil
+	return s.engine.Close()
 }
 
 // Destroy 销毁数据库
@@ -80,6 +73,9 @@ func (s *StandAloneStorage) Write(ctx *kvrpcpb.Context, batch []storage.Modify) 
 	// 构造WriteBatch
 	wb := &engine_util.WriteBatch{}
 	for _, modify := range batch {
+		// 尽管Modify有Put和Delete两种，但是通过查阅当为Delete时WriteBatch.SetCF()和WriteBatch.DeleteCF()并无区别
+		// (Data为Delete时Modify.Value()返回nil)
+		// 因此直接使用SetCF()来写入
 		wb.SetCF(modify.Cf(), modify.Key(), modify.Value())
 	}
 
@@ -95,22 +91,14 @@ type storageReader struct {
 
 // GetCF 根据列族名和键名查询值。 ${cf}_${key}
 func (r *storageReader) GetCF(cf string, key []byte) ([]byte, error) {
-	if cf == "" || len(key) == 0 {
-		return nil, errors.New("empty cf or key")
+	val, err := engine_util.GetCFFromTxn(r.txn, cf, key)
+	if err == badger.ErrKeyNotFound {
+		return nil, nil
 	}
-	cfkey := []byte(fmt.Sprintf("%s_%s", cf, string(key)))
-	item, err := r.txn.Get(cfkey)	// 注意：txn是badger的API，它没有列族的概念，因此一定是我们先拼完整键名
-	if err != nil {
-		if err == badger.ErrKeyNotFound {
-			return nil, nil
-		}
-		return nil, err
-	}
-	valueCopy, err := item.ValueCopy(nil)	// dst为nil或空间不足，会新键slice来存储，并返回。由于不清楚value长度，直接传nil
 	if err != nil {
 		return nil, err
 	}
-	return valueCopy, nil
+	return val, nil
 }
 
 // IterCF 迭代某个CF

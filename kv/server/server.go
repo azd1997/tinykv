@@ -41,12 +41,16 @@ func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kv
 
 	reader, err := server.storage.Reader(req.Context)
 	if err != nil {
-		return nil, err
+		return &kvrpcpb.RawGetResponse{
+			Error:                err.Error(),
+		}, err
 	}
 
 	val, err := reader.GetCF(req.Cf, req.Key)
 	if err != nil {
-		return nil, err
+		return &kvrpcpb.RawGetResponse{
+			Error:                err.Error(),
+		}, err
 	}
 	if val == nil {		// key not found
 		return &kvrpcpb.RawGetResponse{
@@ -73,13 +77,12 @@ func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kv
 
 	err := server.storage.Write(req.Context, []storage.Modify{modify})
 	if err != nil {
-		return nil, err
+		return &kvrpcpb.RawPutResponse{
+			Error:                err.Error(),
+		}, err
 	}
 
-	return &kvrpcpb.RawPutResponse{
-		RegionError:          nil,
-		Error:                "",
-	}, nil
+	return &kvrpcpb.RawPutResponse{}, nil
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
@@ -92,30 +95,37 @@ func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest
 
 	err := server.storage.Write(req.Context, []storage.Modify{modify})
 	if err != nil {
-		return nil, err
+		return &kvrpcpb.RawDeleteResponse{
+			Error:                err.Error(),
+		}, err
 	}
 
-	return &kvrpcpb.RawDeleteResponse{
-		RegionError:          nil,
-		Error:                "",
-	}, nil
+	return &kvrpcpb.RawDeleteResponse{}, nil
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
 	// Your Code Here (1).
 
-	reader, err := server.storage.Reader(req.Context)
-	if err != nil {
-		return nil, err
+	if req.Limit == 0 {
+		return &kvrpcpb.RawScanResponse{}, nil
 	}
 
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		return &kvrpcpb.RawScanResponse{
+			Error:                err.Error(),
+		}, err
+	}
+	defer reader.Close()
+
 	iter := reader.IterCF(req.Cf)
+	defer iter.Close()
 
 	kvPairs := make([]*kvrpcpb.KvPair, 0, req.Limit)
 	for iter.Seek(req.StartKey); iter.Valid() && len(kvPairs) < cap(kvPairs); iter.Next() {
 		item := iter.Item()
 		k := item.Key()
-		v, e := item.Value()
+		v, e := item.ValueCopy(nil)
 
 		var keyError *kvrpcpb.KeyError
 		if e != nil {
