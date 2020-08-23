@@ -103,10 +103,12 @@ func (c *Config) validate() error {
 
 // Progress represents a follower’s progress in the view of the leader. Leader maintains
 // progresses of all followers, and sends entries to the follower based on its progress.
+// 进度。 Leader眼中各个Follower的日志进度
 type Progress struct {
 	Match, Next uint64
 }
 
+// Raft
 type Raft struct {
 	id uint64
 
@@ -155,32 +157,102 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
+
+	// tickFunc 由上层应用传入，控制逻辑时钟的驱动，
+	// 也就是说，Raft层不关心tickFunc如何，只把它看作时间单位
+	// tickFunc由Raft.tick()使用
+	tickFunc func()
 }
 
 // newRaft return a raft peer with the given config
 func newRaft(c *Config) *Raft {
+	// 验证配置有效
 	if err := c.validate(); err != nil {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+
+	// 创建RaftLog实例
+	raftLog := newLog(c.Storage)
+
+	// 获取raftLog这种Storage的状态
+	hs, cs, err := raftLog.storage.InitialState()
+	if err != nil {
+		return nil
+	}
+
+	//
+
+	rf := &Raft{
+		id:               c.ID,
+		Term:             0,	//
+		Vote:             0,
+		RaftLog:          raftLog,
+		Prs:              make(map[uint64]*Progress),	// Leader才需要维护Prs
+		State:            StateFollower,
+		votes:            make(map[uint64]bool),	// Candidate和Leader才需要
+		msgs:             make([]pb.Message, 0),  // 长度多少
+		Lead:             None,
+		heartbeatTimeout: c.HeartbeatTick,	// 心跳超时/周期
+		electionTimeout:  c.ElectionTick,	// 选举超时
+		heartbeatElapsed: 0,
+		electionElapsed:  0,
+		leadTransferee:   0,
+		PendingConfIndex: 0,
+	}
+
+	// 初始化rf.Prs
+	// 根据集群中结点ID，为每个节点初始化Process
+	// 在Process中维护了Match(MatchIndex)和Next(NextIndex)两个索引值
+	// 只有Leader状态下，Prs才生效
+	for _, p := range c.peers {
+		rf.Prs[p] = &Progress{
+			Match: ,
+			Next:  1,
+		}
+	}
+
+	//
+
+	// 将节点切换为Follower
+	rf.becomeFollower(rf.Term, rf.Lead)
+
 	return nil
+}
+
+// send 发送消息，只需将消息压入Raft.msgs队列即可
+func (r *Raft) send(msg pb.Message) {
+	r.msgs = append(r.msgs, msg)
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+
+	entry := pb.Entry{
+		EntryType:            0,
+		Term:                 0,
+		Index:                0,
+		Data:                 nil,
+	}
+
 	return false
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+
+
+
 }
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+
+
 }
 
 // becomeFollower transform this peer's state to Follower
