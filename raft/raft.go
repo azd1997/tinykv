@@ -16,9 +16,12 @@ package raft
 
 import (
 	"errors"
+	"math/rand"
 
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 )
+
+// project2aa Leader election 涉及逻辑时钟/状态切换函数/消息发送/消息处理
 
 // None is a placeholder node ID used when there is no leader.
 const None uint64 = 0
@@ -137,6 +140,8 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+	// 随机选举超时 [electionTimeout, 2 * electionTimeout - 1] 范围
+	randomElectionTimeout int
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -157,11 +162,6 @@ type Raft struct {
 	// value.
 	// (Used in 3A conf change)
 	PendingConfIndex uint64
-
-	// tickFunc 由上层应用传入，控制逻辑时钟的驱动，
-	// 也就是说，Raft层不关心tickFunc如何，只把它看作时间单位
-	// tickFunc由Raft.tick()使用
-	tickFunc func()
 }
 
 // newRaft return a raft peer with the given config
@@ -220,67 +220,144 @@ func newRaft(c *Config) *Raft {
 	return nil
 }
 
-// send 发送消息，只需将消息压入Raft.msgs队列即可
-func (r *Raft) send(msg pb.Message) {
-	r.msgs = append(r.msgs, msg)
-}
 
-// sendAppend sends an append RPC with new entries (if any) and the
-// current commit index to the given peer. Returns true if a message was sent.
-func (r *Raft) sendAppend(to uint64) bool {
-	// Your Code Here (2A).
-
-	entry := pb.Entry{
-		EntryType:            0,
-		Term:                 0,
-		Index:                0,
-		Data:                 nil,
-	}
-
-	return false
-}
-
-// sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
-	// Your Code Here (2A).
-
-
-
-}
+/////////////////////////////// 逻辑时钟 ///////////////////////////////
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
 
-
+	switch r.State {
+	case StateFollower:
+		r.tickElection()
+	case StateCandidate:
+		r.tickElection()
+	case StateLeader:
+		r.tickHeartbeat()
+	}
 }
+
+// tickElection 选举超时 逻辑时钟，每调用一次，刻度+1
+// 适用于Follower/Candidate
+func (r *Raft) tickElection() {
+	r.electionElapsed++		// 逻辑时间加1
+	if r.electionElapsed >= r.randomElectionTimeout {
+		r.electionElapsed = 0 	// 清零
+		// 发送本地消息MsgHup，而后Step()会调用becomeCandidate()将状态切换为Candidate
+		// 不在此处直接调用becomeCandidate的原因：TODO
+		_ = r.Step(pb.Message{
+			MsgType: pb.MessageType_MsgHup,
+			From:    r.id,
+		})     // 本地消息，不需要通过msgs传递
+	}
+}
+
+// tickHeartbeat 心跳时钟 每调用一次，刻度加1
+// 适用于Leader
+func (r *Raft) tickHeartbeat() {
+	r.heartbeatElapsed++
+	if r.heartbeatElapsed >= r.heartbeatTimeout {
+		r.heartbeatElapsed = 0
+		_ = r.Step(pb.Message{
+			MsgType:              pb.MessageType_MsgBeat,
+			From:                 r.id,
+		})   // 本地消息，不需要通过msgs传递
+	}
+}
+
+/////////////////////////////// 状态切换 ///////////////////////////////
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+
+	r.State = StateFollower
+	r.Lead = lead
+	r.Term = term
+	r.Vote = None	// 变为Follower并且此刻没有给任何人投票
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+
+	r.State = StateCandidate
+	r.Lead = None	// 变为候选者说明网络中没有leader
+	r.Term++		// 任期加1
+	r.Vote = r.id	// 给自己投票
+	r.votes = make(map[uint64]bool)		// votes用于收集选票
+	r.votes[r.id] = true
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+
+	r.State = StateLeader
+	r.Lead = r.id	// 自己就是Leader
+	lastIndex := r.RaftLog.LastIndex()	// 日志最后一条的索引
+	r.heartbeatElapsed = 0	// 重置心跳逻辑时钟
+
+	// 为所有集群节点更新Prs
+	// 之所以都加1是因为自己成为Leader这个事情也是要广播出去的
+	for peerId := range r.Prs {
+		if peerId == r.id {
+			r.Prs[peerId].Next = lastIndex + 2
+			r.Prs[peerId].Match = lastIndex + 1
+		} else {
+			r.Prs[peerId].Next = lastIndex + 1
+		}
+	}
+	r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{
+		EntryType:            pb.EntryType_EntryNormal,
+		Term:                 r.Term,
+		Index:                lastIndex + 1,
+		Data:                 nil,
+	})
+	r.broadcastAppend()
+
+	// 如果集群只有自己，直接将日志状态变为committed
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = r.Prs[r.id].Match
+	}
 }
+
+/////////////////////////////// 消息处理 ///////////////////////////////
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+
+
 	switch r.State {
 	case StateFollower:
+		return r.stepFollower(m)
 	case StateCandidate:
+		return r.stepCandidate(m)
 	case StateLeader:
+		return r.stepLeader(m)
 	}
 	return nil
+}
+
+func (r *Raft) stepFollower(m pb.Message) error {
+	switch m.MsgType {
+	case pb.MessageType_MsgHup:
+		// 转变为Candidate
+		r.becomeCandidate()
+		// 开始竞选
+		r.doElection()
+	}
+}
+
+func (r *Raft) stepCandidate(m pb.Message) error {
+
+}
+
+func (r *Raft) stepLeader(m pb.Message) error {
+
 }
 
 // handleAppendEntries handle AppendEntries RPC request
@@ -306,4 +383,112 @@ func (r *Raft) addNode(id uint64) {
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+}
+
+
+func (r *Raft) doElection() {
+	// 一定得是Candidate才可以竞选，否则直接返回
+	if r.State != StateCandidate {
+		return
+	}
+
+	// 心跳时钟清零，重新设置选举超时
+	r.heartbeatElapsed = 0
+	r.randomElectionTimeout = r.electionTimeout + rand.Intn(r.electionTimeout)
+
+	// 如果集群中只有自己，那么直接转为Leader，并返回
+	if len(r.Prs) == 1 {
+		r.becomeLeader()
+		return
+	}
+
+	// 向其他节点发送请求投票
+	r.broadcastRequestVote()
+}
+
+/////////////////////////////// 发送消息 ///////////////////////////////
+
+// send 发送消息，只需将消息压入Raft.msgs队列即可
+func (r *Raft) send(msg pb.Message) {
+	r.msgs = append(r.msgs, msg)
+}
+
+// sendAppend sends an append RPC with new entries (if any) and the
+// current commit index to the given peer. Returns true if a message was sent.
+// 向to发送AppendEntries消息。
+func (r *Raft) sendAppend(to uint64) bool {
+	// Your Code Here (2A).
+
+	// 获取本地日志中最新一条的索引
+	lastIndex := r.RaftLog.LastIndex()
+
+	ents := make([]*pb.Entry, 0)		// 待发送的Entries
+
+	var logTerm, idx uint64
+
+	if lastIndex < r.Prs[to].Next {		// 发现to的日志记录比自己新
+		if lastIndex + 1 != r.Prs[to].Next {	// 本地的下一条依然不是to准备接受的下一个日志
+			panic("[sendAppend] assertion failure")
+			return false
+		}
+		logTerm = r.RaftLog.LastTerm()
+		idx = lastIndex
+	} else {	// 把日志记录中r.Prs[to].Next及往后的都收集到entries
+		entries, err := r.RaftLog.Entries(r.Prs[to].Next)
+		if err != nil {
+			// log
+			return false
+		}
+		idx = r.Prs[to].Next - 1
+		logTerm, err = r.RaftLog.Term(idx)
+		if err != nil {
+			// log
+			return false
+		}
+		for _, v := range entries {
+			tmp := v
+			ents = append(ents, &tmp)
+		}
+	}
+
+	// 
+	entry := pb.Entry{
+		EntryType:            0,
+		Term:                 0,
+		Index:                0,
+		Data:                 nil,
+	}
+
+	return false
+}
+
+// sendHeartbeat sends a heartbeat RPC to the given peer.
+func (r *Raft) sendHeartbeat(to uint64) {
+	// Your Code Here (2A).
+
+
+
+}
+
+// sendRequestVote 发送请求投票消息
+func (r *Raft) sendRequestVote(to uint64) {
+	m := pb.Message{
+		MsgType:              pb.MessageType_MsgRequestVote,
+		To:                   to,
+		From:                 r.id,
+		Term:                 r.Term,
+		LogTerm:              r.RaftLog.LastTerm(),
+		Index:                r.RaftLog.LastIndex(),
+	}
+	r.send(m)
+}
+
+// broadcastRequestVote 向集群其他节点广播请求投票消息
+func (r *Raft) broadcastRequestVote() {
+	for peerId := range r.Prs {
+		if peerId == r.id {
+			continue
+		}
+		r.sendRequestVote(peerId)
+	}
 }
